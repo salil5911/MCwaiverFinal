@@ -1,0 +1,540 @@
+"use client"
+
+import { useState, useEffect, useCallback, useRef } from "react"
+import { format } from "date-fns"
+import { supabase, type SellingWaiver, type Location, getClientComponentClient } from "@/lib/supabase"
+import { DataTable } from "./data-table"
+import type { ColumnDef } from "@tanstack/react-table"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { ChevronDown, ChevronUp, Search, Edit, Save, X, Loader2, Download } from "lucide-react"
+import { Skeleton } from "@/components/ui/skeleton"
+import { toast } from "@/components/ui/use-toast"
+import { groupByMonth, sortMonthsDescending } from "@/lib/utils"
+import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
+import { formatCurrency } from "@/lib/format-utils"
+
+interface SellingWaiversTableProps {
+  location: Location
+  limit?: number
+}
+
+export default function SellingWaiversTable({ location, limit }: SellingWaiversTableProps) {
+  const [data, setData] = useState<SellingWaiver[]>([])
+  const [waivers, setWaivers] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const supabaseClient = getClientComponentClient()
+  const [isLoading, setIsLoading] = useState(true)
+  const [notes, setNotes] = useState<{ [id: string]: string }>({})
+  const [saving, setSaving] = useState<{ [id: string]: boolean }>({})
+  const [activeTextareaId, setActiveTextareaId] = useState<string | null>(null)
+  const [expandedMonths, setExpandedMonths] = useState<{ [month: string]: boolean }>({})
+  const textareaRefs = useRef<{ [id: string]: HTMLTextAreaElement | null }>({})
+  const [searchQuery, setSearchQuery] = useState("")
+  const [filteredData, setFilteredData] = useState<SellingWaiver[]>([])
+
+  const fetchData = async () => {
+    setIsLoading(true)
+
+    try {
+      let query = supabase
+        .from("selling_waivers")
+        .select("*")
+        .eq("location", location)
+        .order("created_at", { ascending: false })
+
+      if (limit) {
+        query = query.limit(limit)
+      }
+
+      const { data, error } = await query
+
+      if (error) {
+        throw error
+      }
+
+      setData(data || [])
+      setFilteredData(data || [])
+
+      // Initialize notes state
+      const initialNotes: { [id: string]: string } = {}
+      data?.forEach((waiver) => {
+        initialNotes[waiver.id] = waiver.additional_notes ?? ""
+      })
+      setNotes(initialNotes)
+
+      // Initialize expanded states for months - expand the most recent month by default
+      if (data && data.length > 0) {
+        const groupedData = groupByMonth(data, (item) => item.created_at)
+        const initialExpandedMonths: { [month: string]: boolean } = {}
+
+        // Expand only the first (most recent) month
+        const months = Object.keys(groupedData)
+        if (months.length > 0) {
+          initialExpandedMonths[months[0]] = true
+        }
+
+        setExpandedMonths(initialExpandedMonths)
+      }
+    } catch (error) {
+      console.error("Error fetching selling waivers:", error)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  // Update the fetchWaivers function to filter by location
+  async function fetchWaivers() {
+    try {
+      setLoading(true)
+      const { data, error } = await supabaseClient
+        .from("selling_waivers")
+        .select("*")
+        .eq("location", location) // Filter by selected location
+        .order("created_at", { ascending: false })
+
+      if (error) {
+        throw error
+      }
+
+      setWaivers(data || [])
+    } catch (error: any) {
+      setError(error.message)
+      console.error("Error fetching selling waivers:", error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // Update the useEffect dependency array to include location
+  useEffect(() => {
+    async function fetchWaivers() {
+      try {
+        setLoading(true)
+        const { data, error } = await supabaseClient
+          .from("selling_waivers")
+          .select("*")
+          .eq("location", location) // Filter by selected location
+          .order("created_at", { ascending: false })
+
+        if (error) {
+          throw error
+        }
+
+        setWaivers(data || [])
+      } catch (error: any) {
+        setError(error.message)
+        console.error("Error fetching selling waivers:", error)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchData()
+
+    // Set up real-time subscription with proper filter for location
+    const subscription = supabase
+      .channel("selling_waivers_changes")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "selling_waivers",
+          filter: `location=eq.${location}`,
+        },
+        (payload) => {
+          // Refresh data when changes occur
+          fetchData()
+        },
+      )
+      .subscribe()
+
+    fetchWaivers()
+
+    return () => {
+      subscription.unsubscribe()
+    }
+  }, [location, limit, supabaseClient]) // Add location to dependency array
+
+  // Effect to maintain focus after state updates
+  useEffect(() => {
+    if (activeTextareaId && textareaRefs.current[activeTextareaId]) {
+      const textarea = textareaRefs.current[activeTextareaId]
+      if (textarea) {
+        textarea.focus()
+        // Preserve cursor position at the end of the text
+        const length = textarea.value.length
+        textarea.setSelectionRange(length, length)
+      }
+    }
+  }, [notes, activeTextareaId])
+
+  // Effect to filter data when search query changes
+  useEffect(() => {
+    if (!searchQuery.trim()) {
+      setFilteredData(data)
+      return
+    }
+
+    const query = searchQuery.toLowerCase()
+    const filtered = data.filter((waiver) => {
+      return (
+        (waiver.full_name && waiver.full_name.toLowerCase().includes(query)) ||
+        (waiver.phone_number && waiver.phone_number.toLowerCase().includes(query)) ||
+        (waiver.device_model && waiver.device_model.toLowerCase().includes(query)) ||
+        (waiver.imei && waiver.imei.toLowerCase().includes(query)) ||
+        (waiver.id_number && waiver.id_number.toLowerCase().includes(query)) ||
+        (waiver.price && waiver.price.toLowerCase().includes(query)) ||
+        (waiver.additional_notes && waiver.additional_notes.toLowerCase().includes(query))
+      )
+    })
+
+    setFilteredData(filtered)
+  }, [searchQuery, data])
+
+  const handleSave = useCallback(
+    async (id: string, note: string) => {
+      if (saving[id]) return
+
+      setSaving((prev) => ({ ...prev, [id]: true }))
+      try {
+        const { error } = await supabase.from("selling_waivers").update({ additional_notes: note }).eq("id", id)
+
+        if (error) throw error
+
+        toast({
+          title: "Notes saved",
+          description: "Additional notes have been updated successfully.",
+          variant: "success",
+        })
+      } catch (error) {
+        console.error("Error saving notes:", error)
+        toast({
+          title: "Error saving notes",
+          description: "There was a problem saving your notes. Please try again.",
+          variant: "destructive",
+        })
+      } finally {
+        setSaving((prev) => ({ ...prev, [id]: false }))
+      }
+    },
+    [saving],
+  )
+
+  const toggleMonthExpansion = (month: string) => {
+    setExpandedMonths((prev) => ({
+      ...prev,
+      [month]: !prev[month],
+    }))
+  }
+
+  const columns: ColumnDef<SellingWaiver>[] = [
+    {
+      accessorKey: "created_at",
+      header: "Date",
+      cell: ({ row }) => {
+        const date = new Date(row.getValue("created_at"))
+        return format(date, "MMM dd, yyyy")
+      },
+    },
+    {
+      accessorKey: "full_name",
+      header: "Customer Name",
+    },
+    {
+      accessorKey: "phone_number",
+      header: "Phone Number",
+      cell: ({ row }) => {
+        const phone = row.getValue("phone_number") as string
+        // Format phone number as (XXX) XXX-XXXX if it's 10 digits
+        if (phone && phone.length === 10) {
+          return `(${phone.substring(0, 3)}) ${phone.substring(3, 6)}-${phone.substring(6)}`
+        }
+        return phone
+      },
+    },
+    {
+      accessorKey: "device_model",
+      header: "Device Model",
+    },
+    {
+      accessorKey: "imei",
+      header: "IMEI",
+    },
+    {
+      accessorKey: "price",
+      header: "Price",
+      cell: ({ row }) => {
+        const price = row.getValue("price") as string
+        return formatCurrency(price)
+      },
+    },
+    {
+      accessorKey: "id_number",
+      header: "ID Number",
+    },
+    {
+      accessorKey: "additional_notes",
+      header: "Additional Notes",
+      cell: ({ row }) => {
+        const waiver = row.original
+        // const [isEditing, setIsEditing] = useState(false) // HOOK ERROR
+        // const [note, setNote] = useState(waiver.additional_notes ?? "") // HOOK ERROR
+        // const [isSaving, setIsSaving] = useState(false) // HOOK ERROR
+        const [cellState, setCellState] = useState({
+          isEditing: false,
+          note: waiver.additional_notes ?? "",
+          isSaving: false,
+        })
+        const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+        // Focus textarea when editing starts
+        useEffect(() => {
+          if (cellState.isEditing && textareaRef.current) {
+            textareaRef.current.focus()
+          }
+        }, [cellState.isEditing])
+
+        const handleSave = async () => {
+          if (cellState.note === waiver.additional_notes) {
+            setCellState((prevState) => ({ ...prevState, isEditing: false }))
+            return
+          }
+
+          setCellState((prevState) => ({ ...prevState, isSaving: true }))
+          try {
+            const { error } = await supabase
+              .from("selling_waivers")
+              .update({ additional_notes: cellState.note })
+              .eq("id", waiver.id)
+
+            if (error) throw error
+
+            toast({
+              title: "Notes saved",
+              description: "Additional notes have been updated successfully.",
+              variant: "success",
+            })
+            setCellState((prevState) => ({ ...prevState, isEditing: false }))
+          } catch (error) {
+            console.error("Error saving notes:", error)
+            toast({
+              title: "Error saving notes",
+              description: "There was a problem saving your notes. Please try again.",
+              variant: "destructive",
+            })
+          } finally {
+            setCellState((prevState) => ({ ...prevState, isSaving: false }))
+          }
+        }
+
+        const handleCancel = () => {
+          setCellState((prevState) => ({
+            ...prevState,
+            note: waiver.additional_notes ?? "",
+            isEditing: false,
+          }))
+        }
+
+        return (
+          <div className="min-w-[250px]">
+            {!cellState.isEditing ? (
+              <div className="flex justify-between items-start">
+                <p className="whitespace-pre-wrap text-sm flex-grow mr-2">{cellState.note || "No additional notes"}</p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setCellState((prevState) => ({ ...prevState, isEditing: true }))}
+                >
+                  <Edit className="h-3.5 w-3.5 mr-1" />
+                  Edit
+                </Button>
+              </div>
+            ) : (
+              <div className="flex flex-col space-y-2">
+                <Textarea
+                  ref={textareaRef}
+                  value={cellState.note}
+                  onChange={(e) => setCellState((prevState) => ({ ...prevState, note: e.target.value }))}
+                  className="min-h-[100px] w-full p-2 text-sm"
+                  placeholder="Enter notes..."
+                  disabled={cellState.isSaving}
+                />
+                <div className="flex space-x-2">
+                  <Button variant="default" size="sm" onClick={handleSave} disabled={cellState.isSaving}>
+                    {cellState.isSaving ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                        Saving...
+                      </>
+                    ) : (
+                      <>
+                        <Save className="h-3.5 w-3.5 mr-1" />
+                        Save
+                      </>
+                    )}
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={handleCancel} disabled={cellState.isSaving}>
+                    <X className="h-3.5 w-3.5 mr-1" />
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        )
+      },
+    },
+  ]
+
+  if (isLoading || loading) {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <Skeleton className="h-10 w-[250px]" />
+          <Skeleton className="h-10 w-[200px]" />
+        </div>
+        <div className="border rounded-md">
+          <div className="h-[400px] flex items-center justify-center">
+            <div className="text-center">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-teal-600 mx-auto"></div>
+              <p className="mt-2 text-sm text-gray-500">Loading data...</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const exportData = () => {
+    // Export data as CSV
+    const headers = ["Date", "Customer Name", "Phone Number", "Device Model", "IMEI", "Price", "ID Number", "Notes"]
+    const csvData = data.map((waiver) => [
+      format(new Date(waiver.created_at), "yyyy-MM-dd"),
+      waiver.full_name,
+      waiver.phone_number,
+      waiver.device_model,
+      waiver.imei,
+      waiver.price,
+      waiver.id_number,
+      waiver.additional_notes || "",
+    ])
+
+    const csvContent = [headers.join(","), ...csvData.map((row) => row.join(","))].join("\n")
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement("a")
+    link.setAttribute("href", url)
+    link.setAttribute("download", `selling_waivers_${location}_${format(new Date(), "yyyy-MM-dd")}.csv`)
+    link.style.visibility = "hidden"
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
+
+  // Group data by month
+  const groupedData = groupByMonth(filteredData, (item) => item.created_at)
+
+  // Group waivers by month
+  const groupedWaivers = groupByMonth(waivers, (item) => item.created_at)
+  const sortedMonths = sortMonthsDescending(Object.keys(groupedWaivers))
+
+  if (error) {
+    return <div>Error loading selling waivers: {error}</div>
+  }
+
+  if (waivers.length === 0) {
+    return <div>No selling waivers found.</div>
+  }
+
+  // If limit is provided, only show the data without grouping
+  if (limit) {
+    return (
+      <div className="space-y-4">
+        <DataTable
+          columns={columns}
+          data={filteredData.slice(0, limit)}
+          filterColumn="full_name"
+          searchPlaceholder="Search by customer name..."
+          showPagination={false}
+        />
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-semibold">Selling Waivers</h2>
+        <div className="flex items-center gap-2">
+          <Badge variant="outline" className="bg-teal-50 text-teal-700 border-teal-200">
+            {location}
+          </Badge>
+          <Button
+            variant="outline"
+            className="flex items-center gap-2 text-teal-700 border-teal-200 hover:bg-teal-50"
+            onClick={exportData}
+          >
+            <Download className="h-4 w-4" />
+            Export All
+          </Button>
+        </div>
+      </div>
+
+      {/* Search bar */}
+      <div className="relative">
+        <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-gray-500" />
+        <Input
+          type="search"
+          placeholder="Search selling waivers by name, phone, device, ID, etc."
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          className="pl-9 w-full max-w-sm"
+        />
+      </div>
+
+      {Object.keys(groupedData).length === 0 ? (
+        <div className="border rounded-md p-8 text-center">
+          <p className="text-gray-500">No selling waivers found for this location.</p>
+        </div>
+      ) : (
+        Object.entries(groupedData).map(([month, monthData]) => (
+          <div key={month} className="border rounded-md mb-6 overflow-hidden">
+            <div
+              className="bg-gray-50 p-4 flex justify-between items-center cursor-pointer"
+              onClick={() => toggleMonthExpansion(month)}
+            >
+              <h3 className="text-lg font-semibold text-gray-800">{month}</h3>
+              <div className="flex items-center gap-2">
+                <Badge className="bg-teal-100 text-teal-800 border-none">
+                  {monthData.length} {monthData.length === 1 ? "waiver" : "waivers"}
+                </Badge>
+                {expandedMonths[month] ? (
+                  <ChevronUp className="h-5 w-5 text-gray-500" />
+                ) : (
+                  <ChevronDown className="h-5 w-5 text-gray-500" />
+                )}
+              </div>
+            </div>
+
+            {expandedMonths[month] && (
+              <div className="p-4">
+                <DataTable
+                  columns={columns}
+                  data={monthData}
+                  filterColumn="full_name"
+                  searchPlaceholder="Search by customer name..."
+                  showPagination={monthData.length > 10}
+                />
+              </div>
+            )}
+          </div>
+        ))
+      )}
+    </div>
+  )
+}
